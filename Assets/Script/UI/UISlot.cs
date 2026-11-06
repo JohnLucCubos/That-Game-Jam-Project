@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
 
@@ -12,6 +13,10 @@ public class UISlot : MonoBehaviour, IDropHandler, IPointerEnterHandler, IPointe
     [SerializeField] private RectTransform content;
     // Leave empty to accept any item. Otherwise the item must have this tag.
     [SerializeField] private string acceptedTag = "";
+    // Leave empty to accept any item. Otherwise the item's Item Id must be listed.
+    [SerializeField] private List<string> acceptedItemIds = new List<string>();
+    // Set by UIGridArea. Used by UIItem.PlacementRule.
+    [SerializeField, HideInInspector] private bool isGridCell;
     // Dropping onto a full slot swaps the two items instead of rejecting.
     [SerializeField] private bool swapWhenOccupied = true;
     // Optional: shown while a valid item is dragged over this slot.
@@ -39,8 +44,20 @@ public class UISlot : MonoBehaviour, IDropHandler, IPointerEnterHandler, IPointe
         get { return swapWhenOccupied; }
     }
 
+    public bool IsGridCell
+    {
+        get { return isGridCell; }
+    }
+
     protected virtual void Awake()
     {
+        if (hoverVisual == gameObject)
+        {
+            Debug.LogWarning("UISlot: Hover Visual can't be the slot itself (it would disable it). " +
+                "Use a child object instead. Ignoring.", this);
+            hoverVisual = null;
+        }
+
         SetHover(false);
     }
 
@@ -58,7 +75,42 @@ public class UISlot : MonoBehaviour, IDropHandler, IPointerEnterHandler, IPointe
             return false;
         }
 
+        if (acceptedItemIds.Count > 0 && !acceptedItemIds.Contains(item.ItemId))
+        {
+            return false;
+        }
+
+        switch (item.Placement)
+        {
+            case UIItem.PlacementRule.Anywhere:
+                break;
+            case UIItem.PlacementRule.GridOnly:
+                if (!isGridCell)
+                {
+                    return false;
+                }
+                break;
+            case UIItem.PlacementRule.SlotsOnly:
+                if (isGridCell)
+                {
+                    return false;
+                }
+                break;
+        }
+
         return true;
+    }
+
+    // Called by UIGridArea when it creates or reloads cells.
+    internal void ConfigureAsGridCell(List<string> itemIds)
+    {
+        isGridCell = true;
+
+        // Grid-level list overrides the cell template's own list when set.
+        if (itemIds != null && itemIds.Count > 0)
+        {
+            acceptedItemIds = new List<string>(itemIds);
+        }
     }
 
     // Type rules AND the slot is free (or already holds this item).

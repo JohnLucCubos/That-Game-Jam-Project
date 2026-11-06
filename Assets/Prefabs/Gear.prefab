@@ -101,7 +101,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 74c58e6720845624a9285a30050f0a7d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::UIItem
-  itemId: 6
+  itemId: Gear
   value: 1
+  placement: 2
   moveDuration: 0.1
   selectedVisual: {fileID: 0}
