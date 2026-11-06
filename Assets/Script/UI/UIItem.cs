@@ -1,0 +1,345 @@
+using System.Collections;
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+/// <summary>
+/// A draggable, selectable, sellable UI item. Put it on an Image inside a Canvas.
+/// Place it as a child of a UISlot in the hierarchy to start in that slot.
+/// On drop: snaps into a valid UISlot, swaps with a full one (if the slot allows),
+/// otherwise returns to where it came from.
+/// </summary>
+[RequireComponent(typeof(RectTransform), typeof(CanvasGroup))]
+public class UIItem : MonoBehaviour,
+    IPointerClickHandler, IBeginDragHandler, IDragHandler, IEndDragHandler
+{
+    // Identifies the item type for stacking and the store, e.g. "wood".
+    // Every copy of the same item must share this id.
+    [SerializeField] private string itemId = "";
+    [SerializeField, Min(0)] private int value = 1;
+    // 0 = snap instantly.
+    [SerializeField, Min(0f)] private float moveDuration = 0.1f;
+    // Optional: shown while this item is selected (e.g. an outline child Image).
+    [SerializeField] private GameObject selectedVisual;
+
+    public string ItemId
+    {
+        get { return itemId; }
+    }
+
+    public int Value
+    {
+        get { return value; }
+    }
+
+    public UISlot CurrentSlot { get; private set; }
+    public bool IsDragging { get; private set; }
+
+    private RectTransform rect;
+    private CanvasGroup canvasGroup;
+    private Canvas rootCanvas;
+    private Coroutine moveRoutine;
+
+    private Vector3 grabOffset;
+    private bool placedThisDrag;
+    // Fallback return point for items that aren't in a slot.
+    private Transform dragStartParent;
+    private Vector3 dragStartLocalPosition;
+
+    private void Awake()
+    {
+        rect = (RectTransform)transform;
+        canvasGroup = GetComponent<CanvasGroup>();
+
+        Canvas parentCanvas = GetComponentInParent<Canvas>();
+        if (parentCanvas != null)
+        {
+            rootCanvas = parentCanvas.rootCanvas;
+        }
+        else
+        {
+            Debug.LogError("UIItem: must be inside a Canvas.", this);
+        }
+
+        SetSelectedVisual(false);
+    }
+
+    private void Start()
+    {
+        // Already placed by code (e.g. spawned by a UISpawnerSlot).
+        if (CurrentSlot != null)
+        {
+            return;
+        }
+
+        // Register with the slot it was placed under in the hierarchy.
+        UISlot startingSlot = GetComponentInParent<UISlot>();
+        if (startingSlot != null && startingSlot.CanAccept(this))
+        {
+            Place(startingSlot, true);
+        }
+    }
+
+    private void OnEnable()
+    {
+        UISelection.Changed += HandleSelectionChanged;
+    }
+
+    private void OnDisable()
+    {
+        UISelection.Changed -= HandleSelectionChanged;
+    }
+
+    private void OnDestroy()
+    {
+        if (CurrentSlot != null)
+        {
+            CurrentSlot.ClearOccupant(this);
+        }
+
+        if (UISelection.Current == this)
+        {
+            UISelection.Clear();
+        }
+    }
+
+    // ---------- Selection ----------
+
+    public void OnPointerClick(PointerEventData eventData)
+    {
+        // A drag also ends in a click; ignore it.
+        if (eventData.dragging)
+        {
+            return;
+        }
+
+        UISelection.Select(this);
+    }
+
+    private void HandleSelectionChanged(UIItem previous, UIItem current)
+    {
+        SetSelectedVisual(current == this);
+    }
+
+    private void SetSelectedVisual(bool visible)
+    {
+        if (selectedVisual != null)
+        {
+            selectedVisual.SetActive(visible);
+        }
+    }
+
+    // ---------- Dragging ----------
+
+    public void OnBeginDrag(PointerEventData eventData)
+    {
+        if (eventData.button != PointerEventData.InputButton.Left || rootCanvas == null)
+        {
+            eventData.pointerDrag = null;
+            return;
+        }
+
+        StopMove();
+        IsDragging = true;
+        placedThisDrag = false;
+        dragStartParent = transform.parent;
+        dragStartLocalPosition = transform.localPosition;
+        UISelection.Select(this);
+
+        if (TryGetPointerWorld(eventData, out Vector3 pointerWorld))
+        {
+            // Offset stops the item snapping its pivot to the cursor.
+            grabOffset = rect.position - pointerWorld;
+        }
+        else
+        {
+            grabOffset = Vector3.zero;
+        }
+
+        // Move to the top of the root canvas so it draws over every slot.
+        transform.SetParent(rootCanvas.transform, true);
+        transform.SetAsLastSibling();
+
+        // Let raycasts pass through to the slot underneath, so it gets OnDrop.
+        canvasGroup.blocksRaycasts = false;
+    }
+
+    public void OnDrag(PointerEventData eventData)
+    {
+        if (!IsDragging)
+        {
+            return;
+        }
+
+        if (TryGetPointerWorld(eventData, out Vector3 pointerWorld))
+        {
+            rect.position = pointerWorld + grabOffset;
+        }
+    }
+
+    // Runs AFTER the slot's OnDrop, so placedThisDrag is already set.
+    public void OnEndDrag(PointerEventData eventData)
+    {
+        if (!IsDragging)
+        {
+            return;
+        }
+
+        IsDragging = false;
+        canvasGroup.blocksRaycasts = true;
+
+        if (!placedThisDrag)
+        {
+            ReturnToOrigin();
+        }
+    }
+
+    /// <summary>
+    /// Called by UISlot.OnDrop. Returns true if the item was placed or swapped.
+    /// </summary>
+    internal bool TryPlace(UISlot slot)
+    {
+        if (slot == null)
+        {
+            return false;
+        }
+
+        if (slot.CanAccept(this))
+        {
+            Place(slot, false);
+            placedThisDrag = true;
+            return true;
+        }
+
+        if (TrySwap(slot))
+        {
+            placedThisDrag = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Places the item without type checks or animation. Used by spawners.
+    /// </summary>
+    internal void PlaceInstant(UISlot slot)
+    {
+        Place(slot, true);
+    }
+
+    /// <summary>
+    /// Removes the item from its slot and destroys it as part of a drop
+    /// (e.g. returned to a spawner stack). Stops the return animation.
+    /// </summary>
+    internal void ConsumeOnDrop()
+    {
+        placedThisDrag = true;
+
+        if (CurrentSlot != null)
+        {
+            CurrentSlot.ClearOccupant(this);
+            CurrentSlot = null;
+        }
+
+        Destroy(gameObject);
+    }
+
+    private bool TrySwap(UISlot target)
+    {
+        UIItem other = target.Occupant;
+        UISlot origin = CurrentSlot;
+
+        if (!target.SwapWhenOccupied || other == null || origin == null)
+        {
+            return false;
+        }
+
+        // Both items must be allowed in each other's slot.
+        if (!target.AcceptsType(this) || !origin.AcceptsType(other))
+        {
+            return false;
+        }
+
+        other.Place(origin, false);
+        Place(target, false);
+        return true;
+    }
+
+    private void Place(UISlot slot, bool instant)
+    {
+        if (CurrentSlot != null && CurrentSlot != slot)
+        {
+            CurrentSlot.ClearOccupant(this);
+        }
+
+        CurrentSlot = slot;
+        slot.SetOccupant(this);
+
+        transform.SetParent(slot.Content, true);
+        MoveLocal(Vector3.zero, instant);
+    }
+
+    private void ReturnToOrigin()
+    {
+        if (CurrentSlot != null)
+        {
+            transform.SetParent(CurrentSlot.Content, true);
+            MoveLocal(Vector3.zero, false);
+        }
+        else
+        {
+            transform.SetParent(dragStartParent, true);
+            MoveLocal(dragStartLocalPosition, false);
+        }
+    }
+
+    // ---------- Movement ----------
+
+    private void MoveLocal(Vector3 target, bool instant)
+    {
+        StopMove();
+
+        if (instant || moveDuration <= 0f || !isActiveAndEnabled)
+        {
+            transform.localPosition = target;
+            return;
+        }
+
+        moveRoutine = StartCoroutine(MoveRoutine(target));
+    }
+
+    private IEnumerator MoveRoutine(Vector3 target)
+    {
+        Vector3 start = transform.localPosition;
+        float elapsed = 0f;
+
+        while (elapsed < moveDuration)
+        {
+            // Unscaled so UI still animates while the game is paused.
+            elapsed += Time.unscaledDeltaTime;
+            float t = Mathf.SmoothStep(0f, 1f, elapsed / moveDuration);
+            transform.localPosition = Vector3.Lerp(start, target, t);
+            yield return null;
+        }
+
+        transform.localPosition = target;
+        moveRoutine = null;
+    }
+
+    private void StopMove()
+    {
+        if (moveRoutine != null)
+        {
+            StopCoroutine(moveRoutine);
+            moveRoutine = null;
+        }
+    }
+
+    // Works for Screen Space Overlay, Screen Space Camera, and World Space canvases.
+    private bool TryGetPointerWorld(PointerEventData eventData, out Vector3 world)
+    {
+        RectTransform canvasRect = (RectTransform)rootCanvas.transform;
+        return RectTransformUtility.ScreenPointToWorldPointInRectangle(
+            canvasRect, eventData.position, eventData.pressEventCamera, out world);
+    }
+}

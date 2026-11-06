@@ -14,7 +14,7 @@ public class ValueLabel : MonoBehaviour
     }
 
     [SerializeField] private Source source = Source.SlotGroupTotal;
-    [SerializeField] private SlotGroup slotGroup;
+    [SerializeField] private UISlotGroup slotGroup;
     [SerializeField] private Wallet wallet;
     // {0} is replaced with the number.
     [SerializeField] private string format = "Total: {0}";
