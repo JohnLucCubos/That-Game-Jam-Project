@@ -3,7 +3,7 @@ using UnityEngine.InputSystem;
 
 /// <summary>
 /// X-axis-only side-scroll movement using the new Input System (Unity 6).
-/// Requires a Rigidbody2D. Y velocity is left to physics (gravity, jumps, etc.).
+/// Requires a Rigidbody2D.
 /// </summary>
 [RequireComponent(typeof(Rigidbody2D))]
 public class SideScrollMovement : MonoBehaviour
